@@ -12,6 +12,7 @@ export default function SignupPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [debugInfo, setDebugInfo] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -19,48 +20,69 @@ export default function SignupPage() {
   const extensionId = searchParams.get("extensionId");
   const referrer = searchParams.get("referrer");
 
+  // CHANGE: Improved extension communication with better error handling
   function notifyExtension(userData: any, token: string) {
-    try {
-      if (extensionId && typeof chrome !== "undefined") {
-        console.log("Attempting to communicate with extension:", extensionId);
-        
-        // Send message to extension with Supabase token
-        chrome.runtime.sendMessage(
-          extensionId,
-          {
-            type: "KNUGGET_AUTH_SUCCESS",
-            payload: {
-              ...userData,
-              token: token,
-              expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+    return new Promise<boolean>((resolve) => {
+      try {
+        if (extensionId && typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          console.log("Attempting to communicate with extension:", extensionId);
+          
+          // Prepare payload with all required fields
+          const payload = {
+            ...userData,
+            token: token,
+            expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+          };
+          
+          console.log("Sending payload to extension:", {
+            id: payload.id,
+            email: payload.email,
+            tokenLength: token.length,
+            expiresAt: new Date(payload.expiresAt).toISOString()
+          });
+          
+          // Send message to extension with Supabase token
+          chrome.runtime.sendMessage(
+            extensionId,
+            {
+              type: "KNUGGET_AUTH_SUCCESS",
+              payload: payload,
             },
-          },
-          function (response: any) {
-            console.log("Extension response received:", response);
-            if (response && response.success) {
-              console.log("Successfully communicated with extension");
-              // Close this tab after 1.5 seconds
-              setTimeout(() => {
-                window.close();
-              }, 1500);
-            } else {
-              console.error("Failed to communicate with extension:", response);
-              setDebugInfo("Failed to communicate with extension: " + JSON.stringify(response));
+            function (response: any) {
+              console.log("Extension response received:", response);
+              if (response && response.success) {
+                console.log("Successfully communicated with extension");
+                setSuccessMessage("Account created successfully! Redirecting back to the extension...");
+                resolve(true);
+                
+                // Close this tab after 1.5 seconds
+                setTimeout(() => {
+                  window.close();
+                }, 1500);
+              } else {
+                console.error("Failed to communicate with extension:", response);
+                setDebugInfo("Failed to communicate with extension: " + JSON.stringify(response));
+                resolve(false);
+              }
             }
+          );
+        } else {
+          console.log("No extension ID found in URL or Chrome API not available");
+          if (!extensionId) {
+            setDebugInfo("No extension ID found in URL");
+          } else if (typeof chrome === "undefined") {
+            setDebugInfo("Chrome API not available");
+          } else if (!chrome.runtime || !chrome.runtime.sendMessage) {
+            setDebugInfo("Chrome runtime sendMessage not available");
           }
-        );
-      } else {
-        console.log("No extension ID found in URL or Chrome API not available");
-        if (!extensionId) {
-          setDebugInfo("No extension ID found in URL");
-        } else if (typeof chrome === "undefined") {
-          setDebugInfo("Chrome API not available");
+          resolve(false);
         }
+      } catch (err) {
+        console.error("Error communicating with extension:", err);
+        setDebugInfo("Error communicating with extension: " + (err instanceof Error ? err.message : String(err)));
+        resolve(false);
       }
-    } catch (err) {
-      console.error("Error communicating with extension:", err);
-      setDebugInfo("Error communicating with extension: " + (err instanceof Error ? err.message : String(err)));
-    }
+    });
   }
 
   const validateForm = () => {
@@ -87,34 +109,28 @@ export default function SignupPage() {
     setLoading(true);
     setError("");
     setDebugInfo(null);
+    setSuccessMessage(null);
 
     try {
       // For debugging, display API URL we're using
-      console.log("Using API URL:", `${window.location.origin}/api/auth/signup`);
+      const apiUrl = `${window.location.origin}/api/auth/signup`;
+      console.log("Using API URL:", apiUrl);
       
-      // First try directly to backend if in development
-      let response;
-      try {
-        // Try directly to backend first (for development)
-        response = await fetch("http://localhost:3000/api/auth/signup", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ name, email, password }),
-        });
-        console.log("Direct backend response status:", response.status);
-      } catch (directError) {
-        console.log("Direct backend request failed, trying through Next.js API route");
-        // If direct request fails, try through Next.js API route
-        response = await fetch(`${window.location.origin}/api/auth/signup`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ name, email, password }),
-        });
-        console.log("Next.js API route response status:", response.status);
+      // CHANGE: Use window.fetch directly with better error handling
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name, email, password }),
+      });
+      
+      console.log("Signup response status:", response.status);
+      
+      // Check for a non-JSON response
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error(`Non-JSON response received: ${await response.text()}`);
       }
 
       const data = await response.json();
@@ -124,15 +140,26 @@ export default function SignupPage() {
         throw new Error(data.error || "Registration failed");
       }
 
+      // Check for required data
+      if (!data.token || !data.user || !data.user.id) {
+        setDebugInfo("Registration succeeded but incomplete data received. Contact support.");
+        console.error("Incomplete registration data:", data);
+        throw new Error("Incomplete registration data received");
+      }
+
       // If this signup came from the extension, use the communication method
       if (source === "extension") {
-        notifyExtension(data.user, data.token);
+        const successfulNotify = await notifyExtension(data.user, data.token);
         
-        // Show success message
-        setDebugInfo("Account created successfully! Redirecting back to the extension...");
+        if (successfulNotify) {
+          // Already set in notifyExtension
+        } else {
+          // Show failure message for extension communication
+          setSuccessMessage("Account created successfully! However, we couldn't connect to the extension. Please close this tab and reload your YouTube page.");
+        }
       } else {
         // Show success message and redirect
-        setDebugInfo("Account created successfully! Redirecting to dashboard...");
+        setSuccessMessage("Account created successfully! Redirecting to dashboard...");
         
         // Normal web app registration flow - redirect after short delay
         setTimeout(() => {
@@ -217,6 +244,29 @@ export default function SignupPage() {
               </div>
               <div className="ml-3">
                 <p className="text-sm text-blue-700">{debugInfo}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {successMessage && (
+          <div className="bg-green-50 border-l-4 border-green-400 p-4">
+            <div className="flex">
+              <div className="flex-shrink-0">
+                <svg
+                  className="h-5 w-5 text-green-400"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </div>
+              <div className="ml-3">
+                <p className="text-sm text-green-700">{successMessage}</p>
               </div>
             </div>
           </div>
@@ -310,12 +360,12 @@ export default function SignupPage() {
           <div>
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !!successMessage}
               className={`group relative flex w-full justify-center rounded-md border border-transparent py-3 px-4 text-sm font-medium text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                loading ? "bg-indigo-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700"
+                loading || successMessage ? "bg-indigo-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700"
               }`}
             >
-              {loading ? "Creating account..." : "Create account"}
+              {loading ? "Creating account..." : successMessage ? "Account created!" : "Create account"}
             </button>
           </div>
           

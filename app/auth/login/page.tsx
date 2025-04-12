@@ -9,55 +9,95 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [debugInfo, setDebugInfo] = useState<string | null>(null); // For debugging
+  const [debugInfo, setDebugInfo] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const router = useRouter();
   const searchParams = useSearchParams();
   const source = searchParams.get("source");
   const extensionId = searchParams.get("extensionId");
 
-  function notifyExtension(userData: any, token: string) {
-    try {
-      if (extensionId && typeof chrome !== "undefined") {
-        console.log("Attempting to communicate with extension:", extensionId);
-        
-        // Send message to extension with Supabase token
-        chrome.runtime.sendMessage(
-          extensionId,
-          {
-            type: "KNUGGET_AUTH_SUCCESS",
-            payload: {
-              ...userData,
-              token: token,
-              expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+  // CHANGE: Improved extension communication with better error handling
+  function notifyExtension(userData: any, token: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      try {
+        if (
+          extensionId &&
+          typeof chrome !== "undefined" &&
+          chrome.runtime &&
+          chrome.runtime.sendMessage
+        ) {
+          console.log("Attempting to communicate with extension:", extensionId);
+
+          // Make sure we have all required data
+          const payload = {
+            ...userData,
+            token: token,
+            expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+          };
+
+          console.log("Sending auth data to extension:", {
+            id: payload.id,
+            email: payload.email,
+            hasToken: !!token,
+            expiresAt: new Date(payload.expiresAt).toISOString(),
+          });
+
+          // Send message to extension with Supabase token
+          chrome.runtime.sendMessage(
+            extensionId,
+            {
+              type: "KNUGGET_AUTH_SUCCESS",
+              payload: payload,
             },
-          },
-          function (response: any) {
-            console.log("Extension response received:", response);
-            if (response && response.success) {
-              console.log("Successfully communicated with extension");
-              // Close this tab after 1.5 seconds
-              setTimeout(() => {
-                window.close();
-              }, 1500);
-            } else {
-              console.error("Failed to communicate with extension:", response);
-              setDebugInfo("Failed to communicate with extension: " + JSON.stringify(response));
+            function (response: any) {
+              console.log("Extension response received:", response);
+              if (response && response.success) {
+                console.log("Successfully communicated with extension");
+                setSuccessMessage(
+                  "Login successful! Returning to extension..."
+                );
+                resolve(true);
+
+                // Close this tab after 1.5 seconds
+                setTimeout(() => {
+                  window.close();
+                }, 1500);
+              } else {
+                console.error(
+                  "Failed to communicate with extension:",
+                  response
+                );
+                setDebugInfo(
+                  "Failed to communicate with extension: " +
+                    JSON.stringify(response)
+                );
+                resolve(false);
+              }
             }
+          );
+        } else {
+          console.log(
+            "No extension ID found in URL or Chrome API not available"
+          );
+          if (!extensionId) {
+            setDebugInfo("No extension ID found in URL");
+          } else if (typeof chrome === "undefined") {
+            setDebugInfo("Chrome API not available");
+          } else if (!chrome.runtime || !chrome.runtime.sendMessage) {
+            setDebugInfo("Chrome runtime sendMessage not available");
           }
-        );
-      } else {
-        console.log("No extension ID found in URL or Chrome API not available");
-        if (!extensionId) {
-          setDebugInfo("No extension ID found in URL");
-        } else if (typeof chrome === "undefined") {
-          setDebugInfo("Chrome API not available");
+          resolve(false);
         }
+      } catch (err) {
+        console.error("Error communicating with extension:", err);
+        setDebugInfo(
+          "Error communicating with extension: " +
+            (err instanceof Error ? err.message : String(err))
+        );
+        resolve(false);
       }
-    } catch (err) {
-      console.error("Error communicating with extension:", err);
-      setDebugInfo("Error communicating with extension: " + (err instanceof Error ? err.message : String(err)));
-    }
+    });
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -65,10 +105,14 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     setDebugInfo(null);
+    setSuccessMessage(null);
 
     try {
       // Use full absolute URL to avoid any path resolution issues
-      const response = await fetch(`${window.location.origin}/api/auth/signin`, {
+      const apiUrl = `${window.location.origin}/api/auth/signin`;
+      console.log("Using API URL for login:", apiUrl);
+
+      const response = await fetch(apiUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -76,27 +120,46 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
+      // Check for non-JSON response
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error(`Non-JSON response received: ${await response.text()}`);
+      }
+
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Login failed");
+        throw new Error(data.error || "Authentication failed");
       }
 
       // If this login came from the extension, use the new communication method
       if (source === "extension") {
-        // Use the new method to communicate with the extension
-        notifyExtension(data.user, data.token);
+        const successfulNotify = await notifyExtension(data.user, data.token);
+
+        if (!successfulNotify) {
+          // Show alternative success message if notifyExtension fails
+          setSuccessMessage(
+            "Login successful! However, we couldn't connect to the extension. Please close this tab and reload your YouTube page."
+          );
+        }
       } else {
         // Normal web app login flow
-        router.push("/dashboard");
+        setSuccessMessage("Login successful! Redirecting to dashboard...");
+        setTimeout(() => {
+          router.push("/dashboard");
+        }, 1500);
       }
     } catch (err) {
       console.error("Login error:", err);
       setError((err as Error).message || "Failed to login. Please try again.");
-      
+
       // Add more debug info
       if (err instanceof Error && err.message.includes("Database error")) {
-        setDebugInfo("There appears to be a database connection issue. Please check your environment variables and database configuration.");
+        setDebugInfo(
+          "There appears to be a database connection issue. Please check your environment variables and database configuration."
+        );
+      } else if (err instanceof Error) {
+        setDebugInfo("Error details: " + err.message);
       }
     } finally {
       setLoading(false);
@@ -107,6 +170,18 @@ export default function LoginPage() {
     <div className="flex min-h-screen flex-col items-center justify-center py-12 px-4 sm:px-6 lg:px-8 bg-gray-50">
       <div className="w-full max-w-md space-y-8">
         <div>
+          <div className="flex justify-center">
+            <svg
+              width="48"
+              height="48"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              className="text-indigo-600"
+            >
+              <path d="M12 2L22 12L12 22L2 12L12 2Z" fill="currentColor" />
+            </svg>
+          </div>
           <h2 className="mt-6 text-center text-3xl font-bold tracking-tight text-gray-900">
             Sign in to your account
           </h2>
@@ -168,73 +243,28 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          <div className="-space-y-px rounded-md shadow-sm">
-            <div>
-              <label htmlFor="email-address" className="sr-only">
-                Email address
-              </label>
-              <input
-                id="email-address"
-                name="email"
-                type="email"
-                autoComplete="email"
-                required
-                className="relative block w-full appearance-none rounded-none rounded-t-md border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
-                placeholder="Email address"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div>
-              <label htmlFor="password" className="sr-only">
-                Password
-              </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                className="relative block w-full appearance-none rounded-none rounded-b-md border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
+        {successMessage && (
+          <div className="bg-green-50 border-l-4 border-green-400 p-4">
+            <div className="flex">
+              <div className="flex-shrink-0">
+                <svg
+                  className="h-5 w-5 text-green-400"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </div>
+              <div className="ml-3">
+                <p className="text-sm text-green-700">{successMessage}</p>
+              </div>
             </div>
           </div>
-
-          <div className="flex items-center justify-between">
-            <div className="text-sm">
-              <Link
-                href="/auth/signup"
-                className="font-medium text-indigo-600 hover:text-indigo-500"
-              >
-                Don't have an account? Sign up
-              </Link>
-            </div>
-            <div className="text-sm">
-              <Link
-                href="/auth/forgot-password"
-                className="font-medium text-indigo-600 hover:text-indigo-500"
-              >
-                Forgot password?
-              </Link>
-            </div>
-          </div>
-
-          <div>
-            <button
-              type="submit"
-              disabled={loading}
-              className={`group relative flex w-full justify-center rounded-md border border-transparent py-2 px-4 text-sm font-medium text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                loading ? "bg-indigo-400" : "bg-indigo-600 hover:bg-indigo-700"
-              }`}
-            >
-              {loading ? "Signing in..." : "Sign in"}
-            </button>
-          </div>
-        </form>
+        )}
       </div>
     </div>
   );

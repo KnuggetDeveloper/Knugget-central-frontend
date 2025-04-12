@@ -1,3 +1,4 @@
+// app/api/auth/signup/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(request: NextRequest) {
@@ -5,7 +6,7 @@ export async function POST(request: NextRequest) {
     const { name, email, password } = await request.json();
 
     // Add logging to help debug
-    console.log("Signup request received:", { name, email, passwordLength: password?.length });
+    console.log("API: Signup request received:", { name, email, passwordLength: password?.length });
 
     // Validate inputs
     if (!name || !email || !password) {
@@ -28,38 +29,48 @@ export async function POST(request: NextRequest) {
     const serverUrl = process.env.SERVER_API_URL || "http://localhost:3000/api";
     console.log("Forwarding request to server at:", serverUrl);
 
-    // Make a request to the backend server
-    const response = await fetch(
-      `${serverUrl}/auth/signup`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ name, email, password }),
+    // Make a request to the backend server with detailed error logging
+    try {
+      const response = await fetch(
+        `${serverUrl}/auth/signup`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ name, email, password }),
+        }
+      );
+
+      // Log the status of the response
+      console.log("Backend response status:", response.status);
+      
+      // For non-OK responses, try to get the error message
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("Backend error details:", errorData);
+        return NextResponse.json(
+          { error: errorData.error || "Registration failed" },
+          { status: response.status }
+        );
       }
-    );
+      
+      const data = await response.json();
+      console.log("Backend response data:", data);
 
-    // Log the status of the response
-    console.log("Backend response status:", response.status);
-    
-    const data = await response.json();
-    console.log("Backend response data:", Object.keys(data));
-
-    if (!response.ok) {
-      console.log("Backend error:", data.error);
+      // Return user data and token with expiresAt
+      return NextResponse.json({
+        user: data.user,
+        token: data.token,
+        expiresAt: data.expiresAt || Date.now() + 24 * 60 * 60 * 1000
+      });
+    } catch (fetchError) {
+      console.error("Error communicating with backend:", fetchError);
       return NextResponse.json(
-        { error: data.error || "Registration failed" },
-        { status: response.status }
+        { error: "Failed to connect to authentication server" },
+        { status: 503 }
       );
     }
-
-    // Return user data and token with expiresAt
-    return NextResponse.json({
-      user: data.user,
-      token: data.token,
-      expiresAt: data.expiresAt || Date.now() + 24 * 60 * 60 * 1000, // Add expiresAt if not provided
-    });
   } catch (error) {
     // Improved error logging
     console.error("Sign up error:", error);
