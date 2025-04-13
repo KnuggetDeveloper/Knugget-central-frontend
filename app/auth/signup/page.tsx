@@ -24,62 +24,86 @@ export default function SignupPage() {
   function notifyExtension(userData: any, token: string) {
     return new Promise<boolean>((resolve) => {
       try {
-        if (extensionId && typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-          console.log("Attempting to communicate with extension:", extensionId);
-          
-          // Prepare payload with all required fields
-          const payload = {
-            ...userData,
-            token: token,
-            expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
-          };
-          
-          console.log("Sending payload to extension:", {
-            id: payload.id,
-            email: payload.email,
-            tokenLength: token.length,
-            expiresAt: new Date(payload.expiresAt).toISOString()
-          });
-          
-          // Send message to extension with Supabase token
-          chrome.runtime.sendMessage(
-            extensionId,
-            {
-              type: "KNUGGET_AUTH_SUCCESS",
-              payload: payload,
-            },
-            function (response: any) {
-              console.log("Extension response received:", response);
-              if (response && response.success) {
-                console.log("Successfully communicated with extension");
-                setSuccessMessage("Account created successfully! Redirecting back to the extension...");
-                resolve(true);
-                
-                // Close this tab after 1.5 seconds
-                setTimeout(() => {
-                  window.close();
-                }, 1500);
-              } else {
-                console.error("Failed to communicate with extension:", response);
-                setDebugInfo("Failed to communicate with extension: " + JSON.stringify(response));
-                resolve(false);
-              }
-            }
-          );
-        } else {
-          console.log("No extension ID found in URL or Chrome API not available");
-          if (!extensionId) {
-            setDebugInfo("No extension ID found in URL");
-          } else if (typeof chrome === "undefined") {
-            setDebugInfo("Chrome API not available");
-          } else if (!chrome.runtime || !chrome.runtime.sendMessage) {
-            setDebugInfo("Chrome runtime sendMessage not available");
-          }
+        console.log("Attempting to notify extension with ID:", extensionId);
+
+        if (!extensionId) {
+          console.error("No extension ID provided");
           resolve(false);
+          return;
         }
+
+        if (
+          typeof chrome === "undefined" ||
+          !chrome.runtime ||
+          !chrome.runtime.sendMessage
+        ) {
+          console.error("Chrome runtime messaging not available");
+          resolve(false);
+          return;
+        }
+
+        // Prepare a consistent user data structure
+        const payload = {
+          id: userData.id,
+          email: userData.email,
+          name: userData.name || "",
+          token: token, // Make sure token is included
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+          credits: userData.credits || 0,
+          plan: userData.plan || "free",
+        };
+
+        console.log("Sending payload to extension:", {
+          id: payload.id,
+          email: payload.email,
+          tokenPresent: !!token,
+          tokenLength: token ? token.length : 0,
+        });
+
+        // Add a timeout in case the extension doesn't respond
+        let messageTimeout = setTimeout(() => {
+          console.log("Extension communication timed out");
+          resolve(false);
+        }, 5000);
+
+        // Send message to extension with token
+        chrome.runtime.sendMessage(
+          extensionId,
+          {
+            type: "KNUGGET_AUTH_SUCCESS",
+            payload: payload,
+          },
+          function (response: any) {
+            clearTimeout(messageTimeout);
+
+            console.log("Extension response received:", response);
+            if (response && response.success) {
+              console.log("Successfully communicated with extension");
+              setSuccessMessage(
+                "Account created successfully! Redirecting back to the extension..."
+              );
+              resolve(true);
+
+              // Close this tab after 1.5 seconds
+              setTimeout(() => {
+                window.close();
+              }, 1500);
+            } else {
+              console.error("Failed to communicate with extension:", response);
+              setDebugInfo(
+                "Failed to communicate with extension: " +
+                  JSON.stringify(response)
+              );
+              resolve(false);
+            }
+          }
+        );
       } catch (err) {
         console.error("Error communicating with extension:", err);
-        setDebugInfo("Error communicating with extension: " + (err instanceof Error ? err.message : String(err)));
+        setDebugInfo(
+          "Error communicating with extension: " +
+            (err instanceof Error ? err.message : String(err))
+        );
         resolve(false);
       }
     });
@@ -90,22 +114,22 @@ export default function SignupPage() {
       setError("Password must be at least 6 characters long");
       return false;
     }
-    
+
     if (password !== confirmPassword) {
       setError("Passwords do not match");
       return false;
     }
-    
+
     return true;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!validateForm()) {
       return;
     }
-    
+
     setLoading(true);
     setError("");
     setDebugInfo(null);
@@ -115,8 +139,7 @@ export default function SignupPage() {
       // For debugging, display API URL we're using
       const apiUrl = `${window.location.origin}/api/auth/signup`;
       console.log("Using API URL:", apiUrl);
-      
-      // CHANGE: Use window.fetch directly with better error handling
+
       const response = await fetch(apiUrl, {
         method: "POST",
         headers: {
@@ -124,9 +147,9 @@ export default function SignupPage() {
         },
         body: JSON.stringify({ name, email, password }),
       });
-      
+
       console.log("Signup response status:", response.status);
-      
+
       // Check for a non-JSON response
       const contentType = response.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
@@ -142,25 +165,62 @@ export default function SignupPage() {
 
       // Check for required data
       if (!data.token || !data.user || !data.user.id) {
-        setDebugInfo("Registration succeeded but incomplete data received. Contact support.");
+        setDebugInfo(
+          "Registration succeeded but incomplete data received. Contact support."
+        );
         console.error("Incomplete registration data:", data);
         throw new Error("Incomplete registration data received");
+      }
+
+      // ADD YOUR CODE HERE - After successful signup and before any redirects
+      if (data.token && data.user) {
+        // If this is running in the extension's context, store token directly
+        if (
+          typeof chrome !== "undefined" &&
+          chrome.storage &&
+          chrome.storage.local
+        ) {
+          console.log("Running in extension context, storing token directly");
+
+          // Create a properly structured user info object
+          const userInfo = {
+            id: data.user.id,
+            email: data.user.email,
+            name: data.user.name || "",
+            token: data.token,
+            expiresAt: data.expiresAt || Date.now() + 24 * 60 * 60 * 1000,
+            credits: data.user.credits || 0,
+            plan: data.user.plan || "free",
+          };
+
+          // Store directly in Chrome storage
+          (chrome.storage.local.set as any)(
+            { knuggetUserInfo: userInfo },
+            function () {
+              console.log("Auth data stored directly in signup page");
+            }
+          );
+        }
       }
 
       // If this signup came from the extension, use the communication method
       if (source === "extension") {
         const successfulNotify = await notifyExtension(data.user, data.token);
-        
+
         if (successfulNotify) {
           // Already set in notifyExtension
         } else {
           // Show failure message for extension communication
-          setSuccessMessage("Account created successfully! However, we couldn't connect to the extension. Please close this tab and reload your YouTube page.");
+          setSuccessMessage(
+            "Account created successfully! However, we couldn't connect to the extension. Please close this tab and reload your YouTube page."
+          );
         }
       } else {
         // Show success message and redirect
-        setSuccessMessage("Account created successfully! Redirecting to dashboard...");
-        
+        setSuccessMessage(
+          "Account created successfully! Redirecting to dashboard..."
+        );
+
         // Normal web app registration flow - redirect after short delay
         setTimeout(() => {
           router.push("/dashboard");
@@ -168,8 +228,10 @@ export default function SignupPage() {
       }
     } catch (err) {
       console.error("Registration error:", err);
-      setError((err as Error).message || "Failed to register. Please try again.");
-      
+      setError(
+        (err as Error).message || "Failed to register. Please try again."
+      );
+
       // Add more debug info
       if (err instanceof Error) {
         setDebugInfo("Error details: " + err.message);
@@ -184,8 +246,15 @@ export default function SignupPage() {
       <div className="w-full max-w-md space-y-8">
         <div>
           <div className="flex justify-center">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="text-indigo-600">
-              <path d="M12 2L22 12L12 22L2 12L12 2Z" fill="currentColor"/>
+            <svg
+              width="48"
+              height="48"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              className="text-indigo-600"
+            >
+              <path d="M12 2L22 12L12 22L2 12L12 2Z" fill="currentColor" />
             </svg>
           </div>
           <h2 className="mt-6 text-center text-3xl font-bold tracking-tight text-gray-900">
@@ -275,7 +344,10 @@ export default function SignupPage() {
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div className="space-y-4 rounded-md shadow-sm">
             <div>
-              <label htmlFor="name" className="block text-sm font-medium text-gray-700">
+              <label
+                htmlFor="name"
+                className="block text-sm font-medium text-gray-700"
+              >
                 Full Name
               </label>
               <input
@@ -290,9 +362,12 @@ export default function SignupPage() {
                 onChange={(e) => setName(e.target.value)}
               />
             </div>
-            
+
             <div>
-              <label htmlFor="email-address" className="block text-sm font-medium text-gray-700">
+              <label
+                htmlFor="email-address"
+                className="block text-sm font-medium text-gray-700"
+              >
                 Email Address
               </label>
               <input
@@ -307,9 +382,12 @@ export default function SignupPage() {
                 onChange={(e) => setEmail(e.target.value)}
               />
             </div>
-            
+
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+              <label
+                htmlFor="password"
+                className="block text-sm font-medium text-gray-700"
+              >
                 Password
               </label>
               <input
@@ -325,9 +403,12 @@ export default function SignupPage() {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
-            
+
             <div>
-              <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700">
+              <label
+                htmlFor="confirm-password"
+                className="block text-sm font-medium text-gray-700"
+              >
                 Confirm Password
               </label>
               <input
@@ -347,11 +428,17 @@ export default function SignupPage() {
           <div className="text-sm text-left">
             <p className="text-gray-500">
               By signing up, you agree to our{" "}
-              <Link href="/terms" className="font-medium text-indigo-600 hover:text-indigo-500">
+              <Link
+                href="/terms"
+                className="font-medium text-indigo-600 hover:text-indigo-500"
+              >
                 Terms of Service
               </Link>{" "}
               and{" "}
-              <Link href="/privacy" className="font-medium text-indigo-600 hover:text-indigo-500">
+              <Link
+                href="/privacy"
+                className="font-medium text-indigo-600 hover:text-indigo-500"
+              >
                 Privacy Policy
               </Link>
             </p>
@@ -362,13 +449,19 @@ export default function SignupPage() {
               type="submit"
               disabled={loading || !!successMessage}
               className={`group relative flex w-full justify-center rounded-md border border-transparent py-3 px-4 text-sm font-medium text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                loading || successMessage ? "bg-indigo-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700"
+                loading || successMessage
+                  ? "bg-indigo-400 cursor-not-allowed"
+                  : "bg-indigo-600 hover:bg-indigo-700"
               }`}
             >
-              {loading ? "Creating account..." : successMessage ? "Account created!" : "Create account"}
+              {loading
+                ? "Creating account..."
+                : successMessage
+                ? "Account created!"
+                : "Create account"}
             </button>
           </div>
-          
+
           <div className="text-center">
             <p className="text-sm text-gray-600">
               Already have an account?{" "}
