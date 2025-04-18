@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import Cookies from "js-cookie";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -17,64 +18,65 @@ export default function LoginPage() {
   const source = searchParams.get("source");
   const extensionId = searchParams.get("extensionId");
 
-  function notifyExtension(userData: any, token: string): Promise<boolean> {
+  function notifyExtension(
+    userData: any,
+    token: string,
+    refreshToken: string
+  ): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       try {
+        console.log("Attempting to notify extension about successful login");
+
+        // Get the extension ID from URL parameters
+        const extensionId = searchParams.get("extensionId");
+
         if (
           extensionId &&
-          typeof chrome !== "undefined" &&
+          chrome &&
           chrome.runtime &&
           chrome.runtime.sendMessage
         ) {
-          console.log("Attempting to communicate with extension:", extensionId);
+          console.log(
+            `Extension ID: ${extensionId}. Sending auth data to extension.`
+          );
 
-          // Make sure we have all required data
-          const payload = {
-            ...userData,
+          // Create a properly structured user info object
+          const userInfo = {
+            id: userData.id,
+            email: userData.email,
+            name: userData.name || "",
             token: token,
-            expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+            refreshToken: refreshToken, // Include refresh token
+            expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours from now
+            credits: userData.credits || 0,
+            plan: userData.plan || "free",
           };
 
-          console.log("Sending auth data to extension:", {
-            id: payload.id,
-            email: payload.email,
-            hasToken: !!token,
-            expiresAt: new Date(payload.expiresAt).toISOString(),
-          });
-
-          // Send message to extension with Supabase token
+          // Store in Chrome extension storage and notify
           chrome.runtime.sendMessage(
             extensionId,
             {
-              type: "KNUGGET_AUTH_SUCCESS",
-              payload: payload,
+              type: "AUTH_LOGIN_SUCCESS",
+              payload: userInfo,
             },
-            function (response: any) {
-              console.log("Extension response received:", response);
-              if (response && response.success) {
-                console.log("Successfully communicated with extension");
-                setSuccessMessage(
-                  "Login successful! Returning to extension..."
-                );
-                resolve(true);
+            (response) => {
+              const success = response && response.success;
+              console.log(
+                `Extension notification ${success ? "successful" : "failed"}`,
+                response
+              );
 
-                // Close this tab after 1.5 seconds
-                setTimeout(() => {
-                  window.close();
-                }, 1500);
-              } else {
-                console.error(
-                  "Failed to communicate with extension:",
-                  response
+              if (success) {
+                setSuccessMessage(
+                  "Successfully logged in! You can close this tab and continue using YouTube."
                 );
-                setDebugInfo(
-                  "Failed to communicate with extension: " +
-                    JSON.stringify(response)
-                );
-                resolve(false);
               }
+
+              resolve(!!success);
             }
           );
+
+          return; // Early return, will resolve in the callback
         } else {
           console.log(
             "No extension ID found in URL or Chrome API not available"
@@ -138,15 +140,67 @@ export default function LoginPage() {
 
       console.log("Login successful:", {
         hasToken: !!data.token,
+        hasRefreshToken: !!data.refreshToken,
         hasUser: !!data.user,
         expiresAt: data.expiresAt
           ? new Date(data.expiresAt).toISOString()
           : "none",
       });
 
+      // Store token in cookie
+      Cookies.set("authToken", data.token, {
+        expires: new Date(data.expiresAt || Date.now() + 24 * 60 * 60 * 1000),
+        path: "/",
+        secure: window.location.protocol === "https:",
+        sameSite: "strict",
+      });
+
+      // Store refresh token if available
+      if (data.refreshToken) {
+        Cookies.set("refreshToken", data.refreshToken, {
+          expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+          path: "/",
+          secure: window.location.protocol === "https:",
+          sameSite: "strict",
+        });
+      }
+
+      // If this is running in the extension's context, store token directly
+      if (
+        typeof chrome !== "undefined" &&
+        chrome.storage &&
+        chrome.storage.local
+      ) {
+        console.log("Running in extension context, storing token directly");
+
+        // Create a properly structured user info object
+        const userInfo = {
+          id: data.user.id,
+          email: data.user.email,
+          name: data.user.name || "",
+          token: data.token,
+          refreshToken: data.refreshToken || data.token, // Use token as refresh token if not provided
+          expiresAt: data.expiresAt || Date.now() + 24 * 60 * 60 * 1000,
+          credits: data.user.credits || 0,
+          plan: data.user.plan || "free",
+        };
+
+        // Store directly in Chrome storage
+        (chrome.storage.local.set as any)(
+          { knuggetUserInfo: userInfo },
+          function () {
+            console.log("Auth data stored directly in login page");
+          }
+        );
+      }
+
       // If this login came from the extension, use communication method
       if (source === "extension") {
-        const successfulNotify = await notifyExtension(data.user, data.token);
+        const successfulNotify = await notifyExtension(
+          data.user,
+          data.token,
+          data.refreshToken || data.token // Use token as refresh token if not provided
+        );
 
         if (!successfulNotify) {
           // Show alternative success message if notifyExtension fails

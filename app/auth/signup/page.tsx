@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import Cookies from "js-cookie";
 
 export default function SignupPage() {
   const [name, setName] = useState("");
@@ -21,83 +22,78 @@ export default function SignupPage() {
   const referrer = searchParams.get("referrer");
 
   // CHANGE: Improved extension communication with better error handling
-  function notifyExtension(userData: any, token: string) {
+  function notifyExtension(
+    userData: any,
+    token: string,
+    refreshToken: string
+  ): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       try {
-        console.log("Attempting to notify extension with ID:", extensionId);
+        console.log("Attempting to notify extension about successful signup");
 
-        if (!extensionId) {
-          console.error("No extension ID provided");
-          resolve(false);
-          return;
-        }
+        // Get the extension ID from URL parameters
+        const extensionId = searchParams.get("extensionId");
 
         if (
-          typeof chrome === "undefined" ||
-          !chrome.runtime ||
-          !chrome.runtime.sendMessage
+          extensionId &&
+          chrome &&
+          chrome.runtime &&
+          chrome.runtime.sendMessage
         ) {
-          console.error("Chrome runtime messaging not available");
-          resolve(false);
-          return;
-        }
+          console.log(
+            `Extension ID: ${extensionId}. Sending auth data to extension.`
+          );
 
-        // Prepare a consistent user data structure
-        const payload = {
-          id: userData.id,
-          email: userData.email,
-          name: userData.name || "",
-          token: token, // Make sure token is included
-          expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
-          credits: userData.credits || 0,
-          plan: userData.plan || "free",
-        };
+          // Create a properly structured user info object
+          const userInfo = {
+            id: userData.id,
+            email: userData.email,
+            name: userData.name || "",
+            token: token,
+            refreshToken: refreshToken, // Include refresh token
+            expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours from now
+            credits: userData.credits || 0,
+            plan: userData.plan || "free",
+          };
 
-        console.log("Sending payload to extension:", {
-          id: payload.id,
-          email: payload.email,
-          tokenPresent: !!token,
-          tokenLength: token ? token.length : 0,
-        });
-
-        // Add a timeout in case the extension doesn't respond
-        let messageTimeout = setTimeout(() => {
-          console.log("Extension communication timed out");
-          resolve(false);
-        }, 5000);
-
-        // Send message to extension with token
-        chrome.runtime.sendMessage(
-          extensionId,
-          {
-            type: "KNUGGET_AUTH_SUCCESS",
-            payload: payload,
-          },
-          function (response: any) {
-            clearTimeout(messageTimeout);
-
-            console.log("Extension response received:", response);
-            if (response && response.success) {
-              console.log("Successfully communicated with extension");
-              setSuccessMessage(
-                "Account created successfully! Redirecting back to the extension..."
+          // Store in Chrome extension storage and notify
+          chrome.runtime.sendMessage(
+            extensionId,
+            {
+              type: "AUTH_SIGNUP_SUCCESS",
+              payload: userInfo,
+            },
+            (response) => {
+              const success = response && response.success;
+              console.log(
+                `Extension notification ${success ? "successful" : "failed"}`,
+                response
               );
-              resolve(true);
 
-              // Close this tab after 1.5 seconds
-              setTimeout(() => {
-                window.close();
-              }, 1500);
-            } else {
-              console.error("Failed to communicate with extension:", response);
-              setDebugInfo(
-                "Failed to communicate with extension: " +
-                  JSON.stringify(response)
-              );
-              resolve(false);
+              if (success) {
+                setSuccessMessage(
+                  "Account created and extension connected successfully! You can close this tab and continue using YouTube."
+                );
+              }
+
+              resolve(!!success);
             }
+          );
+
+          return; // Early return, will resolve in the callback
+        } else {
+          console.log(
+            "No extension ID found in URL or Chrome API not available"
+          );
+          if (!extensionId) {
+            setDebugInfo("No extension ID found in URL");
+          } else if (typeof chrome === "undefined") {
+            setDebugInfo("Chrome API not available");
+          } else if (!chrome.runtime || !chrome.runtime.sendMessage) {
+            setDebugInfo("Chrome runtime sendMessage not available");
           }
-        );
+          resolve(false);
+        }
       } catch (err) {
         console.error("Error communicating with extension:", err);
         setDebugInfo(
@@ -172,40 +168,60 @@ export default function SignupPage() {
         throw new Error("Incomplete registration data received");
       }
 
-      // ADD YOUR CODE HERE - After successful signup and before any redirects
-      if (data.token && data.user) {
-        // If this is running in the extension's context, store token directly
-        if (
-          typeof chrome !== "undefined" &&
-          chrome.storage &&
-          chrome.storage.local
-        ) {
-          console.log("Running in extension context, storing token directly");
+      // Store token in cookie
+      Cookies.set("authToken", data.token, {
+        expires: new Date(data.expiresAt || Date.now() + 24 * 60 * 60 * 1000),
+        path: "/",
+        secure: window.location.protocol === "https:",
+        sameSite: "strict",
+      });
 
-          // Create a properly structured user info object
-          const userInfo = {
-            id: data.user.id,
-            email: data.user.email,
-            name: data.user.name || "",
-            token: data.token,
-            expiresAt: data.expiresAt || Date.now() + 24 * 60 * 60 * 1000,
-            credits: data.user.credits || 0,
-            plan: data.user.plan || "free",
-          };
+      // Store refresh token if available
+      if (data.refreshToken) {
+        Cookies.set("refreshToken", data.refreshToken, {
+          expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+          path: "/",
+          secure: window.location.protocol === "https:",
+          sameSite: "strict",
+        });
+      }
 
-          // Store directly in Chrome storage
-          (chrome.storage.local.set as any)(
-            { knuggetUserInfo: userInfo },
-            function () {
-              console.log("Auth data stored directly in signup page");
-            }
-          );
-        }
+      // If this is running in the extension's context, store token directly
+      if (
+        typeof chrome !== "undefined" &&
+        chrome.storage &&
+        chrome.storage.local
+      ) {
+        console.log("Running in extension context, storing token directly");
+
+        // Create a properly structured user info object
+        const userInfo = {
+          id: data.user.id,
+          email: data.user.email,
+          name: data.user.name || "",
+          token: data.token,
+          refreshToken: data.refreshToken || data.token, // Use token as refresh token if not provided
+          expiresAt: data.expiresAt || Date.now() + 24 * 60 * 60 * 1000,
+          credits: data.user.credits || 0,
+          plan: data.user.plan || "free",
+        };
+
+        // Store directly in Chrome storage
+        (chrome.storage.local.set as any)(
+          { knuggetUserInfo: userInfo },
+          function () {
+            console.log("Auth data stored directly in signup page");
+          }
+        );
       }
 
       // If this signup came from the extension, use the communication method
       if (source === "extension") {
-        const successfulNotify = await notifyExtension(data.user, data.token);
+        const successfulNotify = await notifyExtension(
+          data.user,
+          data.token,
+          data.refreshToken || data.token // Use token as refresh token if not provided
+        );
 
         if (successfulNotify) {
           // Already set in notifyExtension
@@ -227,15 +243,11 @@ export default function SignupPage() {
         }, 1500);
       }
     } catch (err) {
-      console.error("Registration error:", err);
-      setError(
-        (err as Error).message || "Failed to register. Please try again."
+      console.error("Error during signup:", err);
+      setError((err as Error).message || "Registration failed");
+      setDebugInfo(
+        "Error details: " + ((err as Error).message || "Unknown error")
       );
-
-      // Add more debug info
-      if (err instanceof Error) {
-        setDebugInfo("Error details: " + err.message);
-      }
     } finally {
       setLoading(false);
     }
