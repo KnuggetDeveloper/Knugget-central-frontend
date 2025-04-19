@@ -18,6 +18,12 @@ export default function LoginPage() {
   const source = searchParams.get("source");
   const extensionId = searchParams.get("extensionId");
 
+  // Modify app/auth/login/page.tsx and app/auth/signup/page.tsx
+  // Update the notifyExtension function
+
+  // This function is used in both login and signup pages to notify the extension
+  // when a user successfully authenticates on the website
+
   function notifyExtension(
     userData: any,
     token: string,
@@ -29,73 +35,155 @@ export default function LoginPage() {
 
         // Get the extension ID from URL parameters
         const extensionId = searchParams.get("extensionId");
+        console.log("Extension ID from URL:", extensionId);
 
-        if (
-          extensionId &&
-          chrome &&
-          chrome.runtime &&
-          chrome.runtime.sendMessage
-        ) {
-          console.log(
-            `Extension ID: ${extensionId}. Sending auth data to extension.`
+        if (!extensionId) {
+          setDebugInfo(
+            "No extension ID found in URL. Make sure you opened this page from the extension."
           );
-
-          // Create a properly structured user info object
-          const userInfo = {
-            id: userData.id,
-            email: userData.email,
-            name: userData.name || "",
-            token: token,
-            refreshToken: refreshToken, // Include refresh token
-            expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours from now
-            credits: userData.credits || 0,
-            plan: userData.plan || "free",
-          };
-
-          // Store in Chrome extension storage and notify
-          chrome.runtime.sendMessage(
-            extensionId,
-            {
-              type: "AUTH_LOGIN_SUCCESS",
-              payload: userInfo,
-            },
-            (response) => {
-              const success = response && response.success;
-              console.log(
-                `Extension notification ${success ? "successful" : "failed"}`,
-                response
-              );
-
-              if (success) {
-                setSuccessMessage(
-                  "Successfully logged in! You can close this tab and continue using YouTube."
-                );
-              }
-
-              resolve(!!success);
-            }
-          );
-
-          return; // Early return, will resolve in the callback
-        } else {
-          console.log(
-            "No extension ID found in URL or Chrome API not available"
-          );
-          if (!extensionId) {
-            setDebugInfo("No extension ID found in URL");
-          } else if (typeof chrome === "undefined") {
-            setDebugInfo("Chrome API not available");
-          } else if (!chrome.runtime || !chrome.runtime.sendMessage) {
-            setDebugInfo("Chrome runtime sendMessage not available");
-          }
+          console.log("No extension ID parameter in URL");
           resolve(false);
+          return;
         }
+
+        // Check if chrome.runtime is available
+        if (
+          typeof chrome === "undefined" ||
+          !chrome.runtime ||
+          !chrome.runtime.sendMessage
+        ) {
+          setDebugInfo(
+            "Chrome runtime API not available. This may happen if you're not using Chrome or if browser security settings prevent access."
+          );
+          console.log("Chrome runtime API not available for messaging");
+          resolve(false);
+          return;
+        }
+
+        console.log(
+          `Extension ID: ${extensionId}. Sending auth data to extension.`
+        );
+
+        // Define a safe runtime.sendMessage function to handle TypeScript errors
+        const safeMessage = (
+          target: string | undefined,
+          message: any,
+          callback?: (response: any) => void
+        ) => {
+          if (
+            typeof chrome !== "undefined" &&
+            chrome.runtime &&
+            chrome.runtime.sendMessage
+          ) {
+            if (target) {
+              // External messaging (with extension ID)
+              chrome.runtime.sendMessage(
+                target,
+                message,
+                callback || (() => {})
+              );
+            } else {
+              // Internal messaging (within extension)
+              chrome.runtime.sendMessage(message);
+            }
+          }
+        };
+
+        // IMPROVED: Add a timeout to handle cases where the extension doesn't respond
+        const timeoutId = setTimeout(() => {
+          console.log("Extension notification timed out after 3 seconds");
+
+          // Even if extension communication fails, redirect to dashboard
+          setSuccessMessage("Login successful! Redirecting to dashboard...");
+          setTimeout(() => {
+            router.push("/dashboard");
+          }, 1000);
+
+          resolve(false);
+        }, 3000);
+
+        // Create a properly structured user info object
+        const userInfo = {
+          id: userData.id,
+          email: userData.email,
+          name: userData.name || "",
+          token: token,
+          refreshToken: refreshToken || token, // Use token as refresh token if not provided
+          expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours from now
+          credits: userData.credits || 0,
+          plan: userData.plan || "free",
+        };
+
+        // Send message to extension background script
+        safeMessage(
+          extensionId,
+          {
+            type: "AUTH_LOGIN_SUCCESS",
+            payload: userInfo,
+          },
+          (response) => {
+            // Clear timeout since we got a response
+            clearTimeout(timeoutId);
+
+            const success = response && response.success;
+            console.log(
+              `Extension notification ${success ? "successful" : "failed"}`,
+              response
+            );
+
+            if (success) {
+              setSuccessMessage(
+                "Successfully logged in! You can close this tab and continue using YouTube."
+              );
+              resolve(true);
+
+              // Send a request to refresh all YouTube tabs
+              setTimeout(() => {
+                safeMessage(
+                  extensionId,
+                  { type: "REFRESH_ALL_YOUTUBE_TABS" },
+                  () => {
+                    console.log("Sent request to refresh all YouTube tabs");
+                  }
+                );
+
+                // Also send a direct AUTH_STATE_CHANGED message for immediate synchronization
+                safeMessage(
+                  extensionId,
+                  {
+                    type: "AUTH_STATE_CHANGED",
+                    payload: { isLoggedIn: true, forceRefresh: true },
+                  },
+                  () => {
+                    console.log("Sent direct auth state changed message");
+                  }
+                );
+              }, 500);
+            } else {
+              // Even if extension notification failed, redirect to dashboard
+              setSuccessMessage(
+                "Login successful! Redirecting to dashboard..."
+              );
+              setTimeout(() => {
+                router.push("/dashboard");
+              }, 1500);
+              resolve(false);
+            }
+          }
+        );
       } catch (err) {
         console.error("Error communicating with extension:", err);
         setDebugInfo(
           "Error communicating with extension: " +
             (err instanceof Error ? err.message : String(err))
         );
+
+        // Even on error, redirect to dashboard
+        setSuccessMessage("Login successful! Redirecting to dashboard...");
+        setTimeout(() => {
+          router.push("/dashboard");
+        }, 1500);
+
         resolve(false);
       }
     });
